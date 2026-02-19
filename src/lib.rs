@@ -1,6 +1,6 @@
-use std::{fs, io::{self, Write}, path::{Path, PathBuf}};
+use std::{fs::{self, read}, io::{self, Write}, path::{Path, PathBuf}};
 use serde_json::{Value};
-use tar::{Builder, Archive};
+use tar::{Archive, Builder, Header};
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 
@@ -97,10 +97,10 @@ impl Repository {
     /// email: "new@email".to_string()},
     ///  ".").expect("ERR"); // pack_path: archives all child files of the directory "."
     /// ```
-    pub fn save_snapshot(&self, message: &str, ignore: Vec<String>, user: &User, pack_path: &str) -> Result<(), io::Error> {
+    pub fn save_snapshot(&self, message: &str, ignore: Vec<String>, user: &User, search_path: &str) -> Result<(), io::Error> {
             let last_snap = parse_last_snap_id(&self.path)?;
             let last_snap = last_snap + 1; 
-            create_snap(last_snap, message, ignore, user, &self.path, pack_path)?;
+            create_snap(last_snap, message, ignore, user, &self.path, search_path)?;
             fs::write(&self.path.join(HEAD_PATH), last_snap.to_string())?;
         Ok(())
     } 
@@ -116,7 +116,6 @@ impl Repository {
             if borrowed_entry.metadata()?.is_dir() {
                 self.delete_current(borrowed_entry.path(), ignore)?;
             } else {
-                println!("file:{:?}", &borrowed_entry);
                 fs::remove_file(borrowed_entry.path())?;
             }
         }
@@ -179,12 +178,12 @@ fn should_ignore(path: &Path, ignore_list: &Vec<String>) -> bool{
     return false; // ну а если вапще чета как та и не то и не другое то false
 }
 
-fn create_snap(snap_id: u32, message: &str, ignore: Vec<String>, user: &User, path:&PathBuf, pack_path: &str) -> Result<(), std::io::Error> {
+fn create_snap(snap_id: u32, message: &str, ignore: Vec<String>, user: &User, path:&PathBuf, search_path: &str) -> Result<(), std::io::Error> {
         let mut id_str = snap_id.to_string();
         id_str.push_str(".tar");
         let binding = &path.join(SNAP_ARCHIVE_PATH).join(id_str);
         let path_arch = binding;
-        create_archive(fs::File::create(&path_arch)?, ignore, pack_path)?;
+        create_archive(&fs::File::create(&path_arch)?, ignore, search_path)?;
         let hash = calculate_hash(&path_arch)?;
         // let user = get_user()?;
         let snapshot = Snapshot{
@@ -209,25 +208,34 @@ fn calculate_hash(path: &PathBuf) -> Result<String, std::io::Error>  {
     Ok(format!("{:x}", hasher.finalize())) // возвращаеем форматируя как строку и заканчивая хеш
 }
 /// Функция создающая архив с кодом
-fn create_archive(file: fs::File, ignore: Vec<String>, path: &str) -> Result<(), std::io::Error> {
-    let mut archive = Builder::new(file); // Создаем архив в файле
-    let current_dir = fs::read_dir(path); // читаем текущую строку
-    for object in current_dir? {
-        let object = object?; // берем объект
-        let object_name = object.file_name(); // берем имя в виде строки
-        if !ignore.iter().any(|f| f.as_str()==object_name.as_os_str()) { // если строка ignore != файл то
-            if object.metadata()?.is_dir() { //проверь директория ли это
-                archive.append_dir_all(&object_name, &object_name)?; // и заархивируй ее с дочерними элементами
+fn create_archive(arch_file: &fs::File, ignore: Vec<String>, search_path: &str) -> Result<(), io::Error> {
+    let mut archive = Builder::new(arch_file);
+    let read_dir = walkdir::WalkDir::new(search_path).min_depth(1).contents_first(false).follow_links(false);
+    for object in read_dir {
+        println!("{:?}", object);
+        let object = object?; 
+        let object_path = object.path().strip_prefix("./").unwrap_or(object.path());
+        println!("{:?} not in ignore: {}", object_path, should_ignore(object_path, &ignore));
+        println!("{:?}", ignore);
+        
+        if !should_ignore(object_path, &ignore) {
+            if object.path_is_symlink() {
+                let mut header = Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Symlink);
+                let target = fs::read_link(object_path)?;
+                archive.append_link(&mut header, object_path, &target)?; //FIXME
+            }
+            else if object.metadata()?.is_dir() { //проверь директория ли это
+                archive.append_dir(&object_path, &object_path)?; // и заархивируй ее без дочерних элементами
+                println!("{:?}", object.path().to_str().unwrap());
             }
             else { 
-                archive.append_path(object_name)?; // просто заархивируй
+                archive.append_path(object_path)?; // просто заархивируй.
             }
         }
     }
     Ok(())
 }
-/// функция создающая архив с json (снапшот)
-
 /// распаковка архива с данными по id
 fn unpack_arch(path:&PathBuf, id: &u32, unpack_path: &PathBuf) -> Result<(), std::io::Error> {
     // delete_current(&Path::new("."))?;
