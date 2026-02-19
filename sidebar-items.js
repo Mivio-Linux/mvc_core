@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SNAP_ARCHIVE_PATH","SNAP_METADATA_PATH"],"struct":["Repository","Snapshot","User"]};
